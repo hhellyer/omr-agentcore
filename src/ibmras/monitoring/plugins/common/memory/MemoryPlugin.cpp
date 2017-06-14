@@ -435,10 +435,67 @@ int64  MemoryPlugin::getProcessVirtualMemorySize() {
         return -1;
 }
 
+#if defined(LINUX)
+static IDATA readMemInfo(char *buf, UDATA nbytes)
+{
+        IDATA ret = -1;
+        IDATA fd = open("/proc/meminfo", O_RDONLY);
+
+        if (-1 != fd)
+        {
+                ret = 0;
+                /* Read up to (nbytes - 1) bytes to save space for the null terminator. */
+                while (nbytes - ret > 1)
+                {
+                        IDATA nread = read(fd, buf + ret, nbytes - ret - 1);
+
+                        if (nread <= 0)
+                        break;
+                        ret += (UDATA)nread;
+                }
+                buf[ret] = '\0';
+                close(fd);
+        }
+        return ret;
+}
+
+#endif // LINUX
+
+
 int64 MemoryPlugin::getFreePhysicalMemorySize() {
 #if defined(LINUX)
-        /* NOTE: This is accurate even in the context of huge pages. */
-        return(int64)sysconf(_SC_AVPHYS_PAGES) * sysconf(_SC_PAGESIZE);
+
+	/* To do this as other system tools do (sigar, htop) we need to add
+	 * the space used by buffers and cache back onto the free space.
+	 *
+	 * sysinfo() does not report quite all of this so we read /proc/meminfo
+	 * instead.
+	 *
+	 * The total available is MemFree + Buffers + Cached
+	 */
+	char buf[4096];
+	IDATA ret = readMemInfo(buf, sizeof(buf));
+	if( ret == -1 ) {
+		return -1;
+	}
+
+	int64 free = 0, buffers = 0, cached = 0;
+	char *line = strstr(buf, "\nMemFree");
+	if( line != NULL ) {
+		sscanf(line, "\nMemFree:     %ld kB", &free);
+		free *= 1024;
+	}
+	line = strstr(buf, "\nBuffers");
+	if( line != NULL ) {
+		sscanf(line, "\nBuffers:     %ld kB", &buffers);
+		buffers *= 1024;
+	}
+	line = strstr(buf, "\nCached");
+	if( line != NULL ) {
+		sscanf(line, "\nCached:      %ld kB", &cached);
+		cached *= 1024;
+	}
+	return free + buffers + cached;
 
 #elif  defined(__MACH__) || defined(__APPLE__)
 
@@ -503,8 +560,24 @@ int64 MemoryPlugin::getFreePhysicalMemorySize() {
 int64 MemoryPlugin::getTotalPhysicalMemorySize() {
 #if defined (_AIX)
 	return (int64)(sysconf(_SC_AIX_REALMEM) * 1024);
+#elif defined(LINUX)
 
-#elif defined(_LINUX) ||defined(__MACH__)&&defined(_SC_PAGESIZE)&&defined(_SC_PHYS_PAGES) ||defined(__APPLE__)&&defined(_SC_PAGESIZE)&&defined(_SC_PHYS_PAGES)
+	char buf[4096];
+	IDATA ret = readMemInfo(buf, sizeof(buf));
+	if( ret == -1 ) {
+		return -1;
+	}
+
+	int64 total = 0;
+	// MemTotal should be the first item but we won't take that for granted.
+	char *line = strstr(buf, "MemTotal");
+	if( line != NULL ) {
+		sscanf(line, "MemTotal:     %ld kB", &total);
+		total *= 1024;
+	}
+	return total;
+
+#elif defined(__MACH__)&&defined(_SC_PAGESIZE)&&defined(_SC_PHYS_PAGES) ||defined(__APPLE__)&&defined(_SC_PAGESIZE)&&defined(_SC_PHYS_PAGES)
 	IDATA pagesize, num_pages;
 
     pagesize = sysconf(_SC_PAGESIZE);
